@@ -4,6 +4,9 @@ import subprocess
 import random
 import string
 import logging
+import json
+
+CONFIG_FILE = 'croc_config.json'
 
 def setup_logging(log_file='croc_debug.log'):
     """Configures the global logging format and file."""
@@ -33,3 +36,30 @@ def generate_transfer_code(length=6):
     prefixes = ["send", "data", "blue", "red", "fast"]
     random_str = ''.join(random.choices(chars, k=length))
     return f"{random.choice(prefixes)}-{random_str}"
+
+def load_config():
+    """Loads settings and persistent data from JSON."""
+    default_config = {
+        "sender_code": "",
+        "sender_folders": [],
+        "receiver_listeners": [],
+        "delete_after_send": True,
+        "check_interval": 3,
+        "code_length": 6
+    }
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                loaded = json.load(f)
+                default_config.update(loaded)
+        except Exception as e:
+            logging.error(f"Error loading config: {e}")
+    return default_config
+
+def save_config(config):
+    """Saves current state to JSON."""
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=4)
+    except Exception as e:
+        logging.error(f"Error saving config: {e}")

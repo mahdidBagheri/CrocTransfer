@@ -180,25 +180,27 @@ class AutoSendWorker(QThread):
     """
     CLIENT SIDE: Auto-Sender (Watcher Mode)
     Monitors folders. If a file is added/modified, it zips it and pushes it.
-    Can also delete the original file upon success.
+    Can delete original file after successful send based on settings.
     """
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal()
 
-    def __init__(self, folders, code, _7z_path, remove_sent_files):
+    def __init__(self, folders, code, _7z_path, delete_after_send=True, check_interval=3):
         super().__init__()
         self.folders = folders
         self.code = code
         self._7z_path = _7z_path
-        self.remove_sent_files = remove_sent_files
+        self.delete_after_send = delete_after_send
+        self.check_interval = check_interval
+
         self.is_running = True
         self.temp_dir = None
         self.file_tracker = {}
 
     def run(self):
-        self.log_signal.emit(f"\n[Watcher] 👀 Monitoring {len(self.folders)} folders for changes...")
-        if self.remove_sent_files:
-            self.log_signal.emit("[Watcher] ℹ️ Auto-Delete is ENABLED. Originals will be deleted after sending.")
+        self.log_signal.emit(f"\n[Watcher] 👀 Monitoring {len(self.folders)} folders...")
+        self.log_signal.emit(
+            f"[Watcher] ⚙️ Delete sent files: {'Yes' if self.delete_after_send else 'No'} | Interval: {self.check_interval}s")
 
         self.temp_dir = tempfile.mkdtemp(prefix="croc_watch_")
         startupinfo = self._get_startup_info()
@@ -234,32 +236,33 @@ class AutoSendWorker(QThread):
                     subprocess.run([self._7z_path, "a", "-mx=3", zip_path, file_path],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=startupinfo)
 
-                    # BLOCKING SEND
-                    is_success = self.send_file(zip_path, filename, startupinfo)
+                    success = self.send_file(zip_path, filename, startupinfo)
 
-                    # CLEANUP / DELETE ORIGINALS
-                    if is_success:
+                    if success:
                         try:
                             self.file_tracker[file_path] = os.path.getmtime(file_path)
                         except:
                             pass
 
-                        # Remove the temporary zip
-                        try:
-                            os.remove(zip_path)
-                        except:
-                            pass
-
-                        # Remove original if setting enabled
-                        if self.remove_sent_files:
+                        # Apply Deletion Setting
+                        if self.delete_after_send:
                             try:
                                 os.remove(file_path)
-                                self.log_signal.emit(f"[Watcher] 🗑️ Removed original: {filename}")
+                                self.log_signal.emit(f"[Watcher] 🗑️ Deleted original: {filename}")
+                                if file_path in self.file_tracker:
+                                    del self.file_tracker[file_path]  # Remove from tracking since it's gone
                             except Exception as e:
-                                self.log_signal.emit(f"[Watcher] ⚠️ Could not remove original {filename}: {e}")
+                                self.log_signal.emit(f"[Watcher] ⚠️ Could not delete {filename}: {e}")
 
-            # 3. IDLE (Check every 3 seconds)
-            for _ in range(30):
+                    # Cleanup zip
+                    try:
+                        os.remove(zip_path)
+                    except:
+                        pass
+
+            # 3. IDLE (Using check_interval)
+            steps = max(1, int(self.check_interval * 10))
+            for _ in range(steps):
                 if not self.is_running: break
                 time.sleep(0.1)
 
@@ -289,7 +292,6 @@ class AutoSendWorker(QThread):
             else:
                 self.log_signal.emit(f"[Watcher] 🔄 Server busy/offline. Retrying '{original_name}' in 3s...")
                 time.sleep(3)
-
         return False
 
     def _get_startup_info(self):
@@ -341,7 +343,6 @@ class AutoRecvWorker(QThread):
 
         poll_count = 0
         while self.is_running:
-            # We ONLY use --yes.
             cmd = ["croc", "--yes", "--out", self.target_dir, self.code]
 
             self.process = subprocess.Popen(
@@ -355,10 +356,8 @@ class AutoRecvWorker(QThread):
                 if not ln: continue
 
                 lower_ln = ln.lower()
-                # Print real transfer data
                 if any(k in lower_ln for k in ["%", "receiving", "download", "mb", "kb", "speed"]):
                     self.log_signal.emit(f"{tag} {ln}")
-                # Print IF CROC CRASHES so we actually see the bug
                 elif any(k in lower_ln for k in ["error", "flag", "failed", "command not found"]):
                     self.log_signal.emit(f"{tag} ❌ Croc Error: {ln}")
 
@@ -371,10 +370,10 @@ class AutoRecvWorker(QThread):
                 poll_count = 0
             else:
                 poll_count += 1
-                if poll_count >= 10:  # Heartbeat every ~30 seconds
+                if poll_count >= 10:
                     self.log_signal.emit(f"{tag} ⏳ Still polling for sender data on '{self.code}'...")
                     poll_count = 0
-                time.sleep(3)  # Wait 3s before polling again to prevent relay ban
+                time.sleep(3)
 
     def extract_files(self, startupinfo, tag):
         for root, dirs, files in os.walk(self.target_dir):
