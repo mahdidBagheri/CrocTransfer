@@ -198,7 +198,7 @@ class CrocApp(QWidget):
     def setup_auto_recv_tab(self):
         layout = QVBoxLayout()
         info = QLabel(
-            "<i><b>Server Mode:</b> Listen continuously. Downloads files directly into your selected folders.</i>")
+            "<i><b>Server Mode:</b> Listen continuously. Downloads files inside the 'received' directory using your chosen Folder Name.</i>")
         layout.addWidget(info)
 
         self.auto_recv_list = QListWidget()
@@ -211,12 +211,9 @@ class CrocApp(QWidget):
         input_group = QGroupBox("Add Server Listener")
         input_layout = QHBoxLayout()
 
-        self.auto_recv_dir_input = QLineEdit()
-        self.auto_recv_dir_input.setPlaceholderText("Select Save Folder...")
-
-        btn_browse_recv = QPushButton("📁")
-        btn_browse_recv.clicked.connect(lambda: self.browse_path(self.auto_recv_dir_input, is_folder=True))
-        btn_browse_recv.setFixedWidth(40)
+        self.auto_recv_name_input = QLineEdit()
+        self.auto_recv_name_input.setPlaceholderText("Folder Name (e.g. 'Photos')")
+        self.auto_recv_name_input.setFixedWidth(200)
 
         self.auto_recv_code_input = QLineEdit()
         self.auto_recv_code_input.setPlaceholderText("Code to Listen On")
@@ -224,8 +221,7 @@ class CrocApp(QWidget):
         btn_add = QPushButton("➕ Add")
         btn_add.clicked.connect(self.add_recv_listener)
 
-        input_layout.addWidget(self.auto_recv_dir_input)
-        input_layout.addWidget(btn_browse_recv)
+        input_layout.addWidget(self.auto_recv_name_input)
         input_layout.addWidget(self.auto_recv_code_input)
         input_layout.addWidget(btn_add)
         input_group.setLayout(input_layout)
@@ -376,24 +372,21 @@ class CrocApp(QWidget):
     # LOGIC: SERVER (RECEIVER)
     # ==========================
     def add_recv_listener(self):
-        target_dir = self.auto_recv_dir_input.text().strip()
+        name = self.auto_recv_name_input.text().strip()
         code = self.auto_recv_code_input.text().strip()
-
-        if not target_dir or not os.path.isdir(target_dir):
-            QMessageBox.warning(self, "Missing Info", "Please select a valid folder.")
-            return
-        if not code:
-            QMessageBox.warning(self, "Missing Info", "Code is required.")
+        if not name or not code:
+            QMessageBox.warning(self, "Missing Info", "Name and Code are required.")
             return
 
-        display_str = f"{target_dir}  ::  {code}"
+        safe_name = "".join([c for c in name if c.isalnum() or c in (' ', '_', '-')]).strip()
+        display_str = f"{safe_name}  ::  {code}"
 
         existing = [self.auto_recv_list.item(i).text() for i in range(self.auto_recv_list.count())]
         if display_str not in existing:
             self.auto_recv_list.addItem(display_str)
             self._save_state()
 
-        self.auto_recv_dir_input.clear()
+        self.auto_recv_name_input.clear()
         self.auto_recv_code_input.clear()
 
     def remove_recv_listener(self):
@@ -428,10 +421,10 @@ class CrocApp(QWidget):
                 text = self.auto_recv_list.item(i).text()
                 parts = text.split("  ::  ")
                 if len(parts) == 2:
-                    target_dir = parts[0]
+                    folder_name = parts[0]
                     code = parts[1]
 
-                    worker = AutoRecvWorker(code, target_dir, self._7z_path)
+                    worker = AutoRecvWorker(code, self.download_folder, folder_name, self._7z_path)
                     worker.log_signal.connect(self.log)
                     worker.extracted_signal.connect(self.refresh_file_list)
                     self.auto_recv_workers.append(worker)

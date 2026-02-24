@@ -309,10 +309,11 @@ class AutoRecvWorker(QThread):
     log_signal = pyqtSignal(str)
     extracted_signal = pyqtSignal()
 
-    def __init__(self, code, target_dir, _7z_path):
+    def __init__(self, code, base_download_dir, subfolder_name, _7z_path):
         super().__init__()
         self.code = code
-        self.target_dir = target_dir
+        self.subfolder_name = subfolder_name
+        self.target_dir = os.path.join(base_download_dir, subfolder_name)
         self._7z_path = _7z_path
         self.is_running = True
         self.process = None
@@ -325,11 +326,10 @@ class AutoRecvWorker(QThread):
 
     def run(self):
         startupinfo = self._get_startup_info()
-        folder_name = os.path.basename(os.path.normpath(self.target_dir))
-        tag = f"[Server: {folder_name}]"
+        tag = f"[Server: {self.subfolder_name}]"
 
         self.log_signal.emit(f"\n{tag} 🟢 Listening for incoming files on code: '{self.code}'")
-        self.log_signal.emit(f"{tag} 📁 Saving to: {self.target_dir}")
+        self.log_signal.emit(f"{tag} 📁 Saving to: .../received/{self.subfolder_name}")
 
         poll_count = 0
         while self.is_running:
