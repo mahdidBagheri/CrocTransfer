@@ -177,11 +177,6 @@ class CrocWorker(QThread):
 # WORKER: WATCHER (Auto-Sender)
 # ==========================================
 class AutoSendWorker(QThread):
-    """
-    CLIENT SIDE: Auto-Sender (Watcher Mode)
-    Monitors folders. If a file is added/modified, it zips it and pushes it.
-    Can delete original file after successful send based on settings.
-    """
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal()
 
@@ -208,7 +203,6 @@ class AutoSendWorker(QThread):
         while self.is_running:
             files_to_send = []
 
-            # 1. SCAN FOLDERS
             for folder in self.folders:
                 if not os.path.exists(folder): continue
 
@@ -222,7 +216,6 @@ class AutoSendWorker(QThread):
                         except OSError:
                             pass
 
-                            # 2. ZIP AND PUSH NEW FILES
             if files_to_send:
                 self.log_signal.emit(f"[Watcher] 🔎 Detected {len(files_to_send)} new/modified items.")
 
@@ -244,23 +237,20 @@ class AutoSendWorker(QThread):
                         except:
                             pass
 
-                        # Apply Deletion Setting
                         if self.delete_after_send:
                             try:
                                 os.remove(file_path)
                                 self.log_signal.emit(f"[Watcher] 🗑️ Deleted original: {filename}")
                                 if file_path in self.file_tracker:
-                                    del self.file_tracker[file_path]  # Remove from tracking since it's gone
+                                    del self.file_tracker[file_path]
                             except Exception as e:
                                 self.log_signal.emit(f"[Watcher] ⚠️ Could not delete {filename}: {e}")
 
-                    # Cleanup zip
                     try:
                         os.remove(zip_path)
                     except:
                         pass
 
-            # 3. IDLE (Using check_interval)
             steps = max(1, int(self.check_interval * 10))
             for _ in range(steps):
                 if not self.is_running: break
@@ -316,30 +306,30 @@ class AutoSendWorker(QThread):
 # WORKER: SERVER (Auto-Receiver)
 # ==========================================
 class AutoRecvWorker(QThread):
-    """
-    SERVER SIDE: Auto-Receiver
-    Continuously polls for connection. As soon as Sender pushes a file, it downloads.
-    """
     log_signal = pyqtSignal(str)
     extracted_signal = pyqtSignal()
 
-    def __init__(self, code, base_download_dir, subfolder_name, _7z_path):
+    def __init__(self, code, target_dir, _7z_path):
         super().__init__()
         self.code = code
-        self.target_dir = os.path.join(base_download_dir, subfolder_name)
-        self.subfolder_name = subfolder_name
+        self.target_dir = target_dir
         self._7z_path = _7z_path
         self.is_running = True
         self.process = None
 
         if not os.path.exists(self.target_dir):
-            os.makedirs(self.target_dir)
+            try:
+                os.makedirs(self.target_dir)
+            except Exception as e:
+                logging.error(f"Failed to create target dir: {e}")
 
     def run(self):
         startupinfo = self._get_startup_info()
-        tag = f"[Server: {self.subfolder_name}]"
+        folder_name = os.path.basename(os.path.normpath(self.target_dir))
+        tag = f"[Server: {folder_name}]"
 
         self.log_signal.emit(f"\n{tag} 🟢 Listening for incoming files on code: '{self.code}'")
+        self.log_signal.emit(f"{tag} 📁 Saving to: {self.target_dir}")
 
         poll_count = 0
         while self.is_running:
