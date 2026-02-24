@@ -6,8 +6,9 @@ import time
 import logging
 from PyQt5.QtCore import QThread, pyqtSignal
 
+
 # ==========================================
-# WORKER: ZIP (Prepares files)
+# WORKER: ZIP (Prepares manual files)
 # ==========================================
 class ZipWorker(QThread):
     log_signal = pyqtSignal(str)
@@ -58,6 +59,7 @@ class ZipWorker(QThread):
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             return startupinfo
         return None
+
 
 # ==========================================
 # WORKER: LIVE UNZIP (Manual Receive)
@@ -119,6 +121,7 @@ class LiveUnzipWorker(QThread):
     def stop(self):
         self.is_running = False
 
+
 # ==========================================
 # WORKER: CROC (Manual Send/Recv)
 # ==========================================
@@ -170,56 +173,35 @@ class CrocWorker(QThread):
         if self.process: self.process.terminate()
 
 
-import os
-import subprocess
-import tempfile
-import shutil
-import time
-import logging
-from PyQt5.QtCore import QThread, pyqtSignal
-
-
-# ... [Keep ZipWorker, LiveUnzipWorker, and CrocWorker exactly as they were] ...
-# ... [Assuming you have the previous file, I will only paste the CHANGED Auto Workers below] ...
-
+# ==========================================
+# WORKER: WATCHER (Auto-Sender)
+# ==========================================
 class AutoSendWorker(QThread):
     """
     CLIENT SIDE: Auto-Sender (Watcher Mode)
-    1. Monitors a LIST of folders.
-    2. Keeps track of files sent (using modification time).
-    3. If a NEW file appears or an OLD file is MODIFIED:
-       - Zips ONLY that file/folder.
-       - Pushes it to the Receiver.
-       - Updates the tracker.
+    Monitors folders. If a file is added/modified, it zips it and pushes it.
     """
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal()
 
     def __init__(self, folders, code, _7z_path):
         super().__init__()
-        self.folders = folders  # List of folder paths
+        self.folders = folders
         self.code = code
         self._7z_path = _7z_path
         self.is_running = True
         self.temp_dir = None
-
-        # Tracking Dictionary: { 'full_file_path': last_modification_time }
         self.file_tracker = {}
 
     def run(self):
         self.log_signal.emit(f"\n[Watcher] 👀 Monitoring {len(self.folders)} folders for changes...")
         self.temp_dir = tempfile.mkdtemp(prefix="croc_watch_")
-
-        # Initial Scan (Populate tracker so we don't re-send unchanged files if restarted,
-        # or optionally send everything found at start.
-        # Strategy: Send everything found at start to ensure sync, then watch.)
-
         startupinfo = self._get_startup_info()
 
         while self.is_running:
             files_to_send = []
 
-            # 1. SCAN PHASE
+            # 1. SCAN FOLDERS
             for folder in self.folders:
                 if not os.path.exists(folder): continue
 
@@ -228,20 +210,18 @@ class AutoSendWorker(QThread):
                         full_path = os.path.join(root, file)
                         try:
                             mtime = os.path.getmtime(full_path)
-                            # If file is new OR modification time is newer than what we recorded
                             if full_path not in self.file_tracker or mtime > self.file_tracker[full_path]:
                                 files_to_send.append(full_path)
                         except OSError:
-                            pass  # File might be locked or deleted during scan
+                            pass
 
-            # 2. PROCESS PHASE
+                            # 2. ZIP AND PUSH NEW FILES
             if files_to_send:
-                self.log_signal.emit(f"[Watcher] 🔎 Detected {len(files_to_send)} new/modified files.")
+                self.log_signal.emit(f"[Watcher] 🔎 Detected {len(files_to_send)} new/modified items.")
 
                 for file_path in files_to_send:
                     if not self.is_running: break
 
-                    # Prepare Zip
                     filename = os.path.basename(file_path)
                     zip_path = os.path.join(self.temp_dir, filename + ".7z")
 
@@ -249,23 +229,15 @@ class AutoSendWorker(QThread):
                     subprocess.run([self._7z_path, "a", "-mx=3", zip_path, file_path],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=startupinfo)
 
-                    # SEND (Blocking until receiver takes it)
                     self.send_file(zip_path, filename, startupinfo)
 
-                    # Update Tracker (Only if send didn't fail/crash loop)
                     try:
                         self.file_tracker[file_path] = os.path.getmtime(file_path)
-                    except:
-                        pass
-
-                    # Cleanup zip
-                    try:
                         os.remove(zip_path)
                     except:
                         pass
 
-            # 3. WAIT PHASE
-            # Check every 3 seconds for new files
+            # 3. IDLE (Check every 3 seconds)
             for _ in range(30):
                 if not self.is_running: break
                 time.sleep(0.1)
@@ -274,11 +246,8 @@ class AutoSendWorker(QThread):
         self.finished_signal.emit()
 
     def send_file(self, zip_path, original_name, startupinfo):
-        """
-        Loops trying to send a specific file until the receiver accepts it.
-        """
         cmd = ["croc", "send", "--code", self.code, zip_path]
-        self.log_signal.emit(f"[Watcher] 📡 Sending '{original_name}' on code '{self.code}'...")
+        self.log_signal.emit(f"[Watcher] 📡 Hosting '{original_name}' on code '{self.code}'. Waiting for Server...")
 
         while self.is_running:
             process = subprocess.Popen(
@@ -286,15 +255,19 @@ class AutoSendWorker(QThread):
                 text=True, encoding='utf-8', errors='replace', startupinfo=startupinfo
             )
 
-            # We don't spam logs here, just wait for result
+            for line in process.stdout:
+                ln = line.strip()
+                if ln and any(k in ln.lower() for k in ["error", "failed", "flag"]):
+                    self.log_signal.emit(f"[Watcher] ⚠️ Croc warning: {ln}")
+
             process.wait()
 
             if process.returncode == 0:
                 self.log_signal.emit(f"[Watcher] ✅ Sent: {original_name}")
-                return  # Success, go back to main loop
+                return
             else:
-                self.log_signal.emit(f"[Watcher] ⏳ Receiver busy or missing. Retrying '{original_name}' in 5s...")
-                time.sleep(5)
+                self.log_signal.emit(f"[Watcher] 🔄 Server busy/offline. Retrying '{original_name}' in 3s...")
+                time.sleep(3)
 
     def _get_startup_info(self):
         if os.name == 'nt':
@@ -314,10 +287,13 @@ class AutoSendWorker(QThread):
         self.is_running = False
 
 
+# ==========================================
+# WORKER: SERVER (Auto-Receiver)
+# ==========================================
 class AutoRecvWorker(QThread):
     """
     SERVER SIDE: Auto-Receiver
-    Continuously loops. If a sender connects, it downloads.
+    Continuously polls for connection. As soon as Sender pushes a file, it downloads.
     """
     log_signal = pyqtSignal(str)
     extracted_signal = pyqtSignal()
@@ -340,9 +316,10 @@ class AutoRecvWorker(QThread):
 
         self.log_signal.emit(f"\n{tag} 🟢 Listening for incoming files on code: '{self.code}'")
 
+        poll_count = 0
         while self.is_running:
-            # We add --overwrite to ensure updates to files are saved
-            cmd = ["croc", "--yes", "--overwrite", "--out", self.target_dir, self.code]
+            # We ONLY use --yes.
+            cmd = ["croc", "--yes", "--out", self.target_dir, self.code]
 
             self.process = subprocess.Popen(
                 cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -352,19 +329,29 @@ class AutoRecvWorker(QThread):
             for line in self.process.stdout:
                 if not self.is_running: break
                 ln = line.strip()
-                if ln and any(k in ln.lower() for k in ["%", "receiving", "download", "mb", "kb", "speed"]):
+                if not ln: continue
+
+                lower_ln = ln.lower()
+                # Print real transfer data
+                if any(k in lower_ln for k in ["%", "receiving", "download", "mb", "kb", "speed"]):
                     self.log_signal.emit(f"{tag} {ln}")
+                # Print IF CROC CRASHES so we actually see the bug
+                elif any(k in lower_ln for k in ["error", "flag", "failed", "command not found"]):
+                    self.log_signal.emit(f"{tag} ❌ Croc Error: {ln}")
 
             self.process.wait()
             if not self.is_running: break
 
             if self.process.returncode == 0:
-                self.log_signal.emit(f"{tag} 📥 File Received. Unpacking...")
+                self.log_signal.emit(f"{tag} 📥 File Received! Unpacking...")
                 self.extract_files(startupinfo, tag)
-                # Immediately loop back to catch the next file in the sender's queue
+                poll_count = 0
             else:
-                # Receiver disconnects or timeout, short sleep before retry
-                time.sleep(1)
+                poll_count += 1
+                if poll_count >= 10:  # Heartbeat every ~30 seconds
+                    self.log_signal.emit(f"{tag} ⏳ Still polling for sender data on '{self.code}'...")
+                    poll_count = 0
+                time.sleep(3)  # Wait 3s before polling again to prevent relay ban
 
     def extract_files(self, startupinfo, tag):
         for root, dirs, files in os.walk(self.target_dir):
@@ -375,7 +362,7 @@ class AutoRecvWorker(QThread):
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=startupinfo)
                     try:
                         os.remove(filepath)
-                        self.log_signal.emit(f"{tag} 📦 Processed: {f[:-3]}")
+                        self.log_signal.emit(f"{tag} 📦 Unzipped: {f[:-3]}")
                         self.extracted_signal.emit()
                     except OSError:
                         pass
