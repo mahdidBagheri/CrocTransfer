@@ -2,10 +2,12 @@ import os
 import sys
 import subprocess
 import shutil
+import json
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QTextEdit,
                              QFileDialog, QGroupBox, QMessageBox, QTabWidget,
-                             QSpinBox, QFormLayout, QListWidget, QAbstractItemView)
+                             QSpinBox, QFormLayout, QListWidget, QAbstractItemView,
+                             QCheckBox)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 
@@ -18,6 +20,9 @@ class CrocApp(QWidget):
         super().__init__()
         self.setWindowTitle("Croc Transfer Ultimate + Live Sync")
         self.resize(900, 750)
+
+        # Persistence Config Path
+        self.config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "croc_config.json")
 
         self._7z_path = get_7z_path()
         self.download_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "received")
@@ -36,7 +41,8 @@ class CrocApp(QWidget):
         self.staged_base_temp_dir = None
 
         self.init_ui()
-        self.regenerate_codes()
+        self.regenerate_codes()  # Generate initial randomized codes
+        self.load_config()  # Overwrite codes/lists with saved config if exists
         self.refresh_file_list()
         self.set_ui_state("IDLE")
 
@@ -79,7 +85,7 @@ class CrocApp(QWidget):
         main_layout.addWidget(self.log_group)
         self.setLayout(main_layout)
 
-    # --- TAB 1: MANUAL (UNCHANGED) ---
+    # --- TAB 1: MANUAL ---
     def setup_transfer_tab(self):
         layout = QVBoxLayout()
         code_group = QGroupBox("🔑 Transfer Code")
@@ -171,6 +177,7 @@ class CrocApp(QWidget):
         code_layout.addWidget(QLabel("Server Code:"))
         self.auto_send_code = QLineEdit()
         self.auto_send_code.setFont(QFont("Arial", 12, QFont.Bold))
+        self.auto_send_code.textChanged.connect(self.save_config)  # Save to config on change
         code_layout.addWidget(self.auto_send_code)
         code_group.setLayout(code_layout)
         layout.addWidget(code_group)
@@ -255,12 +262,66 @@ class CrocApp(QWidget):
 
     def setup_settings_tab(self):
         layout = QFormLayout()
+
+        # New Settings Checkbox
+        self.chk_remove_sent = QCheckBox("Remove sent files automatically after successful transfer (Watcher Mode)")
+        self.chk_remove_sent.setChecked(True)  # Enabled by default
+        self.chk_remove_sent.stateChanged.connect(self.save_config)
+        layout.addRow("", self.chk_remove_sent)
+
         self.spin_length = QSpinBox()
         self.spin_length.setRange(4, 20)
         self.spin_length.setValue(6)
         self.spin_length.valueChanged.connect(self.update_settings)
         layout.addRow("Auto-Code Length:", self.spin_length)
+
         self.tab_settings.setLayout(layout)
+
+    # ==========================
+    # JSON CONFIG PERSISTENCE
+    # ==========================
+    def load_config(self):
+        """Loads configuration from JSON file."""
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, 'r') as f:
+                    data = json.load(f)
+
+                if "sender_code" in data and data["sender_code"]:
+                    self.auto_send_code.setText(data["sender_code"])
+
+                if "receiver_listeners" in data:
+                    self.auto_recv_list.clear()
+                    for item in data["receiver_listeners"]:
+                        self.auto_recv_list.addItem(item)
+
+                if "remove_sent_files" in data:
+                    self.chk_remove_sent.setChecked(data["remove_sent_files"])
+
+                if "code_length" in data:
+                    self.spin_length.setValue(data["code_length"])
+                    self.code_length = data["code_length"]
+
+            except Exception as e:
+                self.log(f"⚠️ Failed to load config: {e}")
+
+    def save_config(self, *args):
+        """Saves current state to JSON file."""
+        data = {
+            "sender_code": self.auto_send_code.text().strip(),
+            "receiver_listeners": [self.auto_recv_list.item(i).text() for i in range(self.auto_recv_list.count())],
+            "remove_sent_files": self.chk_remove_sent.isChecked(),
+            "code_length": self.spin_length.value()
+        }
+        try:
+            with open(self.config_file, 'w') as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            self.log(f"⚠️ Failed to save config: {e}")
+
+    def update_settings(self, *args):
+        self.code_length = self.spin_length.value()
+        self.save_config()
 
     # ==========================
     # LOGIC: AUTO SENDER (WATCHER)
@@ -268,7 +329,6 @@ class CrocApp(QWidget):
     def add_watch_folder(self):
         dname = QFileDialog.getExistingDirectory(self, 'Select Folder to Watch')
         if dname:
-            # Check dupes
             items = [self.auto_send_list.item(i).text() for i in range(self.auto_send_list.count())]
             if dname not in items:
                 self.auto_send_list.addItem(dname)
@@ -303,7 +363,9 @@ class CrocApp(QWidget):
             self.auto_send_list.setEnabled(False)
             self.auto_send_code.setReadOnly(True)
 
-            self.auto_send_worker = AutoSendWorker(folders, code, self._7z_path)
+            # Pass the CheckBox setting into the worker
+            remove_files = self.chk_remove_sent.isChecked()
+            self.auto_send_worker = AutoSendWorker(folders, code, self._7z_path, remove_files)
             self.auto_send_worker.log_signal.connect(self.log)
             self.auto_send_worker.finished_signal.connect(self.on_auto_send_finished)
             self.auto_send_worker.start()
@@ -331,6 +393,7 @@ class CrocApp(QWidget):
         existing = [self.auto_recv_list.item(i).text() for i in range(self.auto_recv_list.count())]
         if display_str not in existing:
             self.auto_recv_list.addItem(display_str)
+            self.save_config()  # Save on add
 
         self.auto_recv_name_input.clear()
         self.auto_recv_code_input.clear()
@@ -338,6 +401,7 @@ class CrocApp(QWidget):
     def remove_recv_listener(self):
         for item in self.auto_recv_list.selectedItems():
             self.auto_recv_list.takeItem(self.auto_recv_list.row(item))
+        self.save_config()  # Save on remove
 
     def toggle_auto_recv(self):
         if self.auto_recv_workers:
@@ -506,12 +570,11 @@ class CrocApp(QWidget):
         else:
             self.set_ui_state("IDLE")
 
-    def update_settings(self):
-        self.code_length = self.spin_length.value()
-
     def regenerate_codes(self):
+        """Generates random codes, but does not overwrite saved configs if called during initialization"""
         self.txt_code.setText(generate_transfer_code(self.code_length))
         self.auto_send_code.setText(generate_transfer_code(self.code_length))
+        self.save_config()
 
     def browse_path(self, line_edit, is_folder):
         if is_folder:

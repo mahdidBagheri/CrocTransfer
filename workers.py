@@ -180,21 +180,26 @@ class AutoSendWorker(QThread):
     """
     CLIENT SIDE: Auto-Sender (Watcher Mode)
     Monitors folders. If a file is added/modified, it zips it and pushes it.
+    Can also delete the original file upon success.
     """
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal()
 
-    def __init__(self, folders, code, _7z_path):
+    def __init__(self, folders, code, _7z_path, remove_sent_files):
         super().__init__()
         self.folders = folders
         self.code = code
         self._7z_path = _7z_path
+        self.remove_sent_files = remove_sent_files
         self.is_running = True
         self.temp_dir = None
         self.file_tracker = {}
 
     def run(self):
         self.log_signal.emit(f"\n[Watcher] 👀 Monitoring {len(self.folders)} folders for changes...")
+        if self.remove_sent_files:
+            self.log_signal.emit("[Watcher] ℹ️ Auto-Delete is ENABLED. Originals will be deleted after sending.")
+
         self.temp_dir = tempfile.mkdtemp(prefix="croc_watch_")
         startupinfo = self._get_startup_info()
 
@@ -229,13 +234,29 @@ class AutoSendWorker(QThread):
                     subprocess.run([self._7z_path, "a", "-mx=3", zip_path, file_path],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=startupinfo)
 
-                    self.send_file(zip_path, filename, startupinfo)
+                    # BLOCKING SEND
+                    is_success = self.send_file(zip_path, filename, startupinfo)
 
-                    try:
-                        self.file_tracker[file_path] = os.path.getmtime(file_path)
-                        os.remove(zip_path)
-                    except:
-                        pass
+                    # CLEANUP / DELETE ORIGINALS
+                    if is_success:
+                        try:
+                            self.file_tracker[file_path] = os.path.getmtime(file_path)
+                        except:
+                            pass
+
+                        # Remove the temporary zip
+                        try:
+                            os.remove(zip_path)
+                        except:
+                            pass
+
+                        # Remove original if setting enabled
+                        if self.remove_sent_files:
+                            try:
+                                os.remove(file_path)
+                                self.log_signal.emit(f"[Watcher] 🗑️ Removed original: {filename}")
+                            except Exception as e:
+                                self.log_signal.emit(f"[Watcher] ⚠️ Could not remove original {filename}: {e}")
 
             # 3. IDLE (Check every 3 seconds)
             for _ in range(30):
@@ -264,10 +285,12 @@ class AutoSendWorker(QThread):
 
             if process.returncode == 0:
                 self.log_signal.emit(f"[Watcher] ✅ Sent: {original_name}")
-                return
+                return True
             else:
                 self.log_signal.emit(f"[Watcher] 🔄 Server busy/offline. Retrying '{original_name}' in 3s...")
                 time.sleep(3)
+
+        return False
 
     def _get_startup_info(self):
         if os.name == 'nt':
